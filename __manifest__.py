@@ -34,7 +34,10 @@
     'assets': {
         'point_of_sale._assets_pos': [
             'pos_auto_lot_selection/static/src/js/product.js',
-            'pos_auto_lot_selection/src/js/order_patch.js',
+            'pos_auto_lot_selection/static/src/js/order_patch.js',
+           
+
+        
         ],
     },
     'images': ['static/description/banner.jpg'],
