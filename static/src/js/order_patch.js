@@ -1,57 +1,91 @@
 /** @odoo-module **/
 
 import { patch } from "@web/core/utils/patch";
-import { Orderline } from "@point_of_sale/app/store/models";
-
-// Guardamos el método original ANTES de parchearlo
-const _superCanBeMergedWith = Orderline.prototype.can_be_merged_with;
+import { Order } from "@point_of_sale/app/store/models";
 
 /**
- * Parche para permitir que productos con tracking por lote/serial
- * se sumen en la misma línea cuando el lote es el mismo.
+ * Guardamos la referencia al método original de Odoo
+ * ANTES de aplicar el patch, para poder llamarlo luego.
  */
-patch(Orderline.prototype, {
-    /**
-     * otherLine = otra línea con la que Odoo intenta fusionar esta.
-     */
-    can_be_merged_with(otherLine) {
-        // 1) Ejecutamos primero la lógica original de Odoo
-        const originalResult = _superCanBeMergedWith.call(this, otherLine);
+const _superAddProduct = Order.prototype.add_product;
 
-        // Si Odoo ya dice que sí se pueden fusionar, no tocamos nada.
-        if (originalResult) {
-            return true;
+/**
+ * Parche sobre Order.add_product:
+ *
+ * - Si el producto tiene tracking (lote/serial)
+ * - Y las opciones traen un lote en draftPackLotLines.newPackLotLines[0].lot_name
+ * - Y ya existe una línea con el mismo producto + mismo lote
+ *
+ * Entonces:
+ *   👉 en lugar de crear una línea nueva, se incrementa la cantidad
+ *      de la línea existente.
+ */
+patch(Order.prototype, {
+    async add_product(product, options = {}) {
+        // 1) Si por alguna razón no hay producto, usamos el flujo original
+        if (!product) {
+            return await _superAddProduct.call(this, product, options);
         }
 
-        // 2) Si el producto NO tiene tracking, dejamos el resultado original.
-        const product = this.get_product();
-        if (!product.tracking || product.tracking === "none") {
-            return originalResult;
+        // Cantidad que se va a añadir (por defecto 1)
+        const quantity = options.quantity || 1;
+
+        // 2) Solo nos interesa intervenir si el producto tiene tracking
+        //    (por lote o número de serie)
+        if (product.tracking && product.tracking !== "none") {
+            let lotName = null;
+
+            // Buscamos el lote que viene desde getAddProductOptions
+            // (tu product.js devuelve draftPackLotLines con newPackLotLines)
+            if (
+                options.draftPackLotLines &&
+                Array.isArray(options.draftPackLotLines.newPackLotLines) &&
+                options.draftPackLotLines.newPackLotLines.length === 1
+            ) {
+                lotName = options.draftPackLotLines.newPackLotLines[0].lot_name;
+            }
+
+            if (lotName) {
+                // 3) Buscamos si ya existe una línea con:
+                //    - mismo producto
+                //    - mismo lote
+                const existingLine = this
+                    .get_orderlines()
+                    .find((line) => {
+                        if (!line.product || line.product.id !== product.id) {
+                            return false;
+                        }
+                        if (!line.pack_lot_lines || !line.pack_lot_lines.length) {
+                            return false;
+                        }
+                        // ¿Alguna de las líneas de lote de esta orderline tiene ese mismo lot_name?
+                        return line.pack_lot_lines.some(
+                            (pl) => pl.lot_name === lotName
+                        );
+                    });
+
+                if (existingLine) {
+                    // 🔁 Ya existe una línea con mismo producto + mismo lote:
+                    //     → sumamos cantidad en esa MISMA línea.
+                    const currentQty = existingLine.get_quantity();
+                    const newQty = currentQty + quantity;
+
+                    console.log(
+                        "[pos_auto_lot_selection] Merge en misma línea:",
+                        product.display_name,
+                        "Lote:", lotName,
+                        "Qty:", currentQty, "→", newQty
+                    );
+
+                    existingLine.set_quantity(newQty);
+                    // OJO: NO llamamos al super, así evitamos crear línea nueva.
+                    return existingLine;
+                }
+            }
         }
 
-        // 3) Aquí solo entramos si el producto tiene tracking (lote/serial)
-
-        const thisLots = (this.pack_lot_lines || [])
-            .map((l) => l.lot_name)
-            .filter((name) => !!name);
-
-        const otherLots = (otherLine.pack_lot_lines || [])
-            .map((l) => l.lot_name)
-            .filter((name) => !!name);
-
-        // Mismo producto + un solo lote en cada línea + mismo nombre de lote
-        const sameSingleLot =
-            thisLots.length === 1 &&
-            otherLots.length === 1 &&
-            thisLots[0] === otherLots[0];
-
-        if (sameSingleLot) {
-            // ✅ Permitimos fusionar cuando el lote es el mismo
-            return true;
-        }
-
-        // En cualquier otro caso (lotes distintos, varios lotes, etc.),
-        // usamos la respuesta original (normalmente false).
-        return originalResult;
+        // 4) Si no se cumple nuestra condición (sin tracking, sin lote,
+        //    lote distinto, etc.), usamos el comportamiento original de Odoo.
+        return await _superAddProduct.call(this, product, options);
     },
 });
