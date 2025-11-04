@@ -1,71 +1,57 @@
 /** @odoo-module **/
+
 import { patch } from "@web/core/utils/patch";
 import { Orderline } from "@point_of_sale/app/store/models";
 
+// Guardamos el método original ANTES de parchearlo
+const _superCanBeMergedWith = Orderline.prototype.can_be_merged_with;
+
 /**
- * Parche sobre el comportamiento de fusión de líneas del POS.
- *
- * Objetivo:
- * ----------
- * - Cuando el producto tiene tracking por lote/serie
- * - Y el lote es EXACTAMENTE el mismo
- *
- * Entonces:
- * - NO queremos una nueva línea
- * - Queremos que se SUME la cantidad en la misma línea.
- *
- * Para todo lo demás, dejamos que Odoo se comporte como siempre.
+ * Parche para permitir que productos con tracking por lote/serial
+ * se sumen en la misma línea cuando el lote es el mismo.
  */
 patch(Orderline.prototype, {
     /**
-     * Decide si esta línea (`this`) se puede fusionar con `otherOrderline`.
-     * Si devuelve:
-     *  - true  → Odoo suma cantidades en la misma línea.
-     *  - false → Odoo crea una nueva línea.
+     * otherLine = otra línea con la que Odoo intenta fusionar esta.
      */
-    can_be_merged_with(otherOrderline) {
-        // 1) Si el producto no es el mismo, nunca fusionamos.
-        if (this.get_product().id !== otherOrderline.get_product().id) {
-            return false;
-        }
+    can_be_merged_with(otherLine) {
+        // 1) Ejecutamos primero la lógica original de Odoo
+        const originalResult = _superCanBeMergedWith.call(this, otherLine);
 
-        const product = this.get_product();
-
-        // 2) Si el producto NO tiene tracking por lote/serial,
-        // dejamos que Odoo use su comportamiento original.
-        // (Para productos sin tracking ya te funciona bien).
-        if (!product.tracking || product.tracking === "none") {
-            // this._super(...) llama a la versión original de Odoo.
-            return this._super(otherOrderline);
-        }
-
-        // 3) Producto CON tracking (lote/serial).
-        //    Revisamos los lotes asociados a cada línea.
-
-        // Lista de nombres de lote en la línea actual.
-        const thisLots = (this.pack_lot_lines || [])
-            .map((lot) => lot.lot_name)
-            .filter(Boolean); // quitamos vacíos/null
-
-        // Lista de nombres de lote en la otra línea.
-        const otherLots = (otherOrderline.pack_lot_lines || [])
-            .map((lot) => lot.lot_name)
-            .filter(Boolean);
-
-        // 4) Caso especial que queremos permitir:
-        //    - ambas líneas tienen EXACTAMENTE 1 lote
-        //    - y el nombre del lote es el mismo.
-        if (
-            thisLots.length === 1 &&
-            otherLots.length === 1 &&
-            thisLots[0] === otherLots[0]
-        ) {
-            // ✅ Permitir fusión → Odoo sumará cantidades
+        // Si Odoo ya dice que sí se pueden fusionar, no tocamos nada.
+        if (originalResult) {
             return true;
         }
 
-        // 5) En cualquier otro caso (lotes distintos, múltiples, sin lote):
-        // volvemos al comportamiento original de Odoo.
-        return this._super(otherOrderline);
+        // 2) Si el producto NO tiene tracking, dejamos el resultado original.
+        const product = this.get_product();
+        if (!product.tracking || product.tracking === "none") {
+            return originalResult;
+        }
+
+        // 3) Aquí solo entramos si el producto tiene tracking (lote/serial)
+
+        const thisLots = (this.pack_lot_lines || [])
+            .map((l) => l.lot_name)
+            .filter((name) => !!name);
+
+        const otherLots = (otherLine.pack_lot_lines || [])
+            .map((l) => l.lot_name)
+            .filter((name) => !!name);
+
+        // Mismo producto + un solo lote en cada línea + mismo nombre de lote
+        const sameSingleLot =
+            thisLots.length === 1 &&
+            otherLots.length === 1 &&
+            thisLots[0] === otherLots[0];
+
+        if (sameSingleLot) {
+            // ✅ Permitimos fusionar cuando el lote es el mismo
+            return true;
+        }
+
+        // En cualquier otro caso (lotes distintos, varios lotes, etc.),
+        // usamos la respuesta original (normalmente false).
+        return originalResult;
     },
 });
